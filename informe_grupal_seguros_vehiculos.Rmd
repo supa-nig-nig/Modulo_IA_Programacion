@@ -20,7 +20,7 @@ library(moments)
 library(ggplot2)
 options(scipen = 999)
 
-data <- read_csv2("C:/Users/Marketing/OneDrive/Documents/analisis_de_datos/Seguros_Vehiculos.csv")
+data <- read_csv2("Seguros_Vehiculos.csv")
 ```
 
 ```{r vista-inicial}
