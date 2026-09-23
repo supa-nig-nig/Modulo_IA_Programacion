@@ -1,0 +1,560 @@
+---
+title: "INFORME - SEGUROS VEHICULOS - TRABAJO GRUPAL"
+author: ", MÓNICA DANIELA BARREIRO LINZÁN, ENZO YESANCE SÁNCHEZ TANG"
+date: "2026-09-23"
+output: html_document
+---
+
+# Introducción
+
+El sector asegurador automotriz requiere evaluar constantemente la siniestralidad de sus pólizas para ajustar tarifas, predecir pérdidas y detectar perfiles de riesgo elevado. El presente informe desarrolla una auditoría integral de datos sobre el conjunto `Seguros_Vehiculos`, compuesto por información demográfica, socioeconómica y de historial conductivo de 65,000 asegurados, estructurando transformaciones complejas de variables y generando visualizaciones efectivas para la toma de decisiones gerenciales.
+
+El análisis se organiza en tres fases: (1) tratamiento, limpieza y calidad de datos; (2) manipulación, agregación y métricas de siniestralidad; y (3) visualización de datos e insights visuales.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(stringr)
+library(moments)
+library(ggplot2)
+options(scipen = 999)
+
+data <- read_csv2("C:/Users/Marketing/OneDrive/Documents/analisis_de_datos/Seguros_Vehiculos.csv")
+```
+
+```{r vista-inicial}
+head(data)
+str(data)
+summary(data)
+```
+
+# Fase 1: Tratamiento, Limpieza y Calidad de Datos
+
+## 1. Parseo de variables monetarias
+
+Las columnas `Ingresos`, `ValorDomicilio`, `ValVehiculo` y `TCuantia` se encuentran registradas en formato texto, incluyendo caracteres como `$`, comas de separación de miles y espacios. Se define una función reutilizable para transformarlas a tipo numérico.
+
+```{r confirmacion-tipos}
+str(data$Ingresos)
+str(data$ValorDomicilio)
+str(data$ValVehiculo)
+str(data$TCuantia)
+```
+
+```{r funcion-limpieza}
+limpiar_columna <- function(variable){
+  variable <- str_remove_all(variable, "\\$")
+  variable <- str_remove_all(variable, ",")
+  variable <- str_trim(variable)
+  as.numeric(variable)
+}
+```
+
+```{r aplicar-limpieza}
+data$Ingresos <- limpiar_columna(data$Ingresos)
+data$ValorDomicilio <- limpiar_columna(data$ValorDomicilio)
+data$ValVehiculo <- limpiar_columna(data$ValVehiculo)
+data$TCuantia <- limpiar_columna(data$TCuantia)
+
+str(data$Ingresos)
+str(data$ValorDomicilio)
+str(data$ValVehiculo)
+str(data$TCuantia)
+```
+
+Tras la transformación, las cuatro columnas quedan correctamente tipificadas como variables numéricas, permitiendo su uso en operaciones estadísticas y agregaciones posteriores.
+
+## 2. Tratamiento de valores nulos (NA/NaN)
+
+### 2.1 Identificación de valores faltantes
+
+```{r conteo-na}
+sum(is.na(data))
+
+colSums(is.na(data))
+colSums(is.na(data)) >= 1
+
+NA_por_columna <- colSums(is.na(data))
+NA_por_columna[NA_por_columna >= 1]
+```
+
+```{r filas-afectadas}
+filas_con_algun_na <- sum(rowSums(is.na(data[, c("Edad", "AntiguedadTrabajo", "Ingresos",
+                                                    "ValorDomicilio", "Trabajo", "Antiguedad")])) > 0)
+filas_con_algun_na
+filas_con_algun_na / nrow(data) * 100
+```
+
+Las filas que contienen al menos un valor NA en las seis variables de interés representan aproximadamente el 26.45% del total de asegurados. Dado que este porcentaje es demasiado alto para eliminar las filas afectadas sin comprometer seriamente el tamaño y la representatividad de la muestra, se optó por implementar una estrategia de imputación fundamentada para cada variable, en lugar de la eliminación directa, lo que hace viable y razonable la imputación.
+
+### 2.2 Estado previo a la imputación
+
+```{r resumen-antes}
+resumen_antes <- data.frame(
+  variable = c("Edad", "AntiguedadTrabajo", "Ingresos", "ValorDomicilio", "Antiguedad"),
+  media_antes = c(mean(data$Edad, na.rm = TRUE), mean(data$AntiguedadTrabajo, na.rm = TRUE),
+                  mean(data$Ingresos, na.rm = TRUE), mean(data$ValorDomicilio, na.rm = TRUE),
+                  mean(data$Antiguedad, na.rm = TRUE)),
+  sd_antes = c(sd(data$Edad, na.rm = TRUE), sd(data$AntiguedadTrabajo, na.rm = TRUE),
+               sd(data$Ingresos, na.rm = TRUE), sd(data$ValorDomicilio, na.rm = TRUE),
+               sd(data$Antiguedad, na.rm = TRUE))
+)
+```
+
+Se genera un data frame con detalles de la media y desviación estandar de cada variable que contiene Na con la intención de poder comparar con el nuevo dataframe una vez ya se haga el analisis y las imputaciones.
+
+### 2.3 Diagnóstico — Variables de menor dispersión
+
+Antes de decidir el método de imputación, se evalúa si el porcentaje de valores faltantes varía según categorías relacionadas, para determinar si corresponde una imputación general o condicional.
+
+```{r diagnostico-menor-dispersion}
+data |>
+  group_by(Trabajo) |>
+  summarise(pct_na = mean(is.na(AntiguedadTrabajo)) * 100)
+
+data |>
+  group_by(Educacion) |>
+  summarise(pct_na = mean(is.na(Edad)) * 100)
+
+data |>
+  mutate(rango_edad = cut(Edad, breaks = c(0, 30, 55, 100),
+                          labels = c("Joven", "Adulto", "Senior"))) |>
+  group_by(rango_edad) |>
+  summarise(pct_na = mean(is.na(Antiguedad)) * 100)
+```
+
+**Hallazgos:** `AntiguedadTrabajo` y `Antiguedad` presentan un porcentaje de NA homogéneo entre categorías (evidencia de un patrón aleatorio, MCAR), por lo que se aplica mediana general. `Edad`, aunque con muy pocos NA en términos absolutos (<0.3%), muestra una tasa notablemente mayor en la categoría "Bachiller" frente a "Master" y "PhD" (0%), evidenciando dependencia con el nivel educativo, por lo que se aplica mediana condicional por Educación.
+
+### 2.4 Diagnóstico — Variables de mayor dispersión
+
+```{r diagnostico-mayor-dispersion}
+data |>
+  group_by(Trabajo) |>
+  summarise(pct_na = mean(is.na(Ingresos)) * 100)
+
+data |>
+  group_by(Educacion) |>
+  summarise(pct_na = mean(is.na(Ingresos)) * 100)
+
+data |>
+  group_by(Zona) |>
+  summarise(pct_na = mean(is.na(ValorDomicilio)) * 100)
+```
+
+### 2.5 Profundización en las variables de mayor dispersión
+
+```{r profundizacion-ingresos}
+sum(is.na(data$Trabajo) & is.na(data$Ingresos))
+table(TrabajoNA = is.na(data$Trabajo), IngresosNA = is.na(data$Ingresos))
+
+mean(data$Ingresos, na.rm = TRUE)
+median(data$Ingresos, na.rm = TRUE)
+skewness(data$Ingresos, na.rm = TRUE)
+
+hist(data$Ingresos, main = "Distribución de Ingresos", col = "lightblue", breaks = 50)
+abline(v = mean(data$Ingresos, na.rm = TRUE), col = "red", lwd = 2, lty = 2)
+abline(v = median(data$Ingresos, na.rm = TRUE), col = "darkgreen", lwd = 2, lty = 2)
+legend("topright", legend = c("Media", "Mediana"), col = c("red", "darkgreen"), lty = 2, lwd = 2)
+```
+
+`Ingresos` al ser una variable monetaria se hizo un analisis para poder aproximar resultados que fueran coherentes en la cartera, la variable presenta una distribución sesgada (media > mediana, skewness = 1.30), con una tasa de NA relativamente homogénea entre categorías de Trabajo y Educación para usar como mediana condicional.
+
+Se evaluó tambien la hipótesis de que los NA conjuntos en `Trabajo` e `Ingresos` correspondieran a asegurados sin empleo formal: de 4,750 casos con `Trabajo` faltante, solo 273 (5.75%) presentan también `Ingresos` faltante, respaldando parcialmente esta hipótesis únicamente para ese subconjunto específico.
+
+```{r profundizacion-valordomicilio}
+sum(data$ValorDomicilio == 0, na.rm = TRUE)
+mean(data$ValorDomicilio == 0, na.rm = TRUE) * 100
+
+mean(data$ValorDomicilio, na.rm = TRUE)
+median(data$ValorDomicilio, na.rm = TRUE)
+skewness(data$ValorDomicilio, na.rm = TRUE)
+
+hist(data$ValorDomicilio, main = "Distribución de ValorDomicilio", col = "lightsalmon", breaks = 50)
+abline(v = mean(data$ValorDomicilio, na.rm = TRUE), col = "red", lwd = 2, lty = 2)
+abline(v = median(data$ValorDomicilio, na.rm = TRUE), col = "darkgreen", lwd = 2, lty = 2)
+legend("topright", legend = c("Media", "Mediana"), col = c("red", "darkgreen"), lty = 2, lwd = 2)
+```
+
+`ValorDomicilio` es una variable que se debe tratar con cautela por su propio contexto, el 33.08% de los asegurados tiene un valor 0 (no propietarios de vivienda), lo que indica una mezcla de dos subpoblaciones en lugar de una distribución continua pura. 
+
+Ante la ausencia de evidencia sobre si los NA corresponden a propietarios o no, se opta por una imputación conservadora respecto al perfil de riesgo asumiendo que los asegurados con ValorDomicilio en 0 no disponen de vivienda propia al momento.
+
+### 2.6 Estrategia de imputación y ejecución
+
+**Resumen de la estrategia adoptada:**
+
+| Variable | Método | Justificación |
+|---|---|---|
+| AntiguedadTrabajo | Mediana general | NA homogéneo entre categorías de Trabajo (MCAR) |
+| Antiguedad | Mediana general | NA homogéneo entre rangos de edad (MCAR) |
+| Edad | Mediana condicional por Educación | NA depende del nivel educativo |
+| Ingresos | Mediana condicional por Trabajo (0 para casos de sin-empleo evidenciado) | Distribución sesgada; dependencia parcial con Trabajo |
+| ValorDomicilio | Mínimo (0) | 33% de no-propietarios; decisión conservadora ante ausencia de evidencia |
+| Trabajo | Categoría "Desconocido" / "Sin empleo, No reportado" | Variable categórica; se preserva la falta como información |
+
+```{r imputacion-menor-dispersion}
+data$AntiguedadTrabajo[is.na(data$AntiguedadTrabajo)] <- median(data$AntiguedadTrabajo, na.rm = TRUE)
+
+data <- data %>%
+  group_by(Educacion) %>%
+  mutate(Edad = ifelse(is.na(Edad), median(Edad, na.rm = TRUE), Edad)) %>%
+  ungroup()
+
+data$Antiguedad[is.na(data$Antiguedad)] <- median(data$Antiguedad, na.rm = TRUE)
+```
+
+```{r imputacion-ingresos}
+sin_empleo <- is.na(data$Trabajo) & is.na(data$Ingresos)
+
+data$Ingresos[sin_empleo] <- 0
+data$Trabajo[sin_empleo] <- "Sin empleo/No reportado"
+
+data <- data %>%
+  group_by(Trabajo) %>%
+  mutate(Ingresos = ifelse(is.na(Ingresos), median(Ingresos, na.rm = TRUE), Ingresos)) %>%
+  ungroup()
+
+data$Trabajo[is.na(data$Trabajo)] <- "Desconocido"
+
+sum(is.na(data$Ingresos))
+```
+Se verificó que ningún grupo de Trabajo careciera de valores observados para el cálculo de la mediana condicional, por lo que la imputación de Ingresos no dejó valores faltantes residuales.
+
+```{r imputacion-valordomicilio}
+data$ValorDomicilio[is.na(data$ValorDomicilio)] <- 0
+```
+
+### 2.7 Comprobación del impacto de la imputación
+
+```{r verificacion-impacto}
+colSums(is.na(data[, c("Edad", "AntiguedadTrabajo", "Ingresos", "ValorDomicilio", "Trabajo", "Antiguedad")]))
+
+resumen_despues <- data.frame(
+  variable = c("Edad", "AntiguedadTrabajo", "Ingresos", "ValorDomicilio", "Antiguedad"),
+  media_despues = c(mean(data$Edad), mean(data$AntiguedadTrabajo),
+                    mean(data$Ingresos), mean(data$ValorDomicilio),
+                    mean(data$Antiguedad)),
+  sd_despues = c(sd(data$Edad), sd(data$AntiguedadTrabajo),
+                 sd(data$Ingresos), sd(data$ValorDomicilio),
+                 sd(data$Antiguedad))
+)
+
+comparacion <- merge(resumen_antes, resumen_despues, by = "variable")
+comparacion$reduccion_sd_pct <- round((1 - comparacion$sd_despues/comparacion$sd_antes) * 100, 2)
+comparacion
+```
+
+```{r histogramas-despues}
+hist(data$Ingresos, main = "Distribución de Ingresos (después de imputar)",
+     col = "lightblue", breaks = 50)
+abline(v = mean(data$Ingresos), col = "red", lwd = 2, lty = 2)
+abline(v = median(data$Ingresos), col = "darkgreen", lwd = 2, lty = 2)
+legend("topright", legend = c("Media", "Mediana"), col = c("red", "darkgreen"), lty = 2, lwd = 2)
+
+hist(data$ValorDomicilio, main = "Distribución de ValorDomicilio (después de imputar)",
+     col = "lightsalmon", breaks = 50)
+abline(v = mean(data$ValorDomicilio), col = "red", lwd = 2, lty = 2)
+abline(v = median(data$ValorDomicilio), col = "darkgreen", lwd = 2, lty = 2)
+legend("topright", legend = c("Media", "Mediana"), col = c("red", "darkgreen"), lty = 2, lwd = 2)
+```
+
+Al comparar la desviación estándar antes y después de la imputación, se observa el patrón esperado en cuatro de las cinco variables: una reducción de la variabilidad (entre 0.04% y 3.27%), consistente con el efecto típico de la imputación por mediana. 
+
+La variable `ValorDomicilio` constituye la excepción, con un ligero aumento en la desviación estándar (-0.62%), explicado por la naturaleza distinta de su imputación: al usar el valor mínimo (0) en lugar de una medida de tendencia central, y dado que la variable ya presentaba una masa considerable de ceros (33.08%), el efecto refuerza la estructura bimodal de la variable en lugar de concentrarla hacia el centro. 
+
+Este resultado es coherente con la decisión metodológica tomada: se priorizó la fundamentación conceptual —evitar asumir propiedad de vivienda sin evidencia— sobre la minimización estadística de la varianza.
+
+## 3. Estandarización categórica y consistencia
+
+Se validan y recodifican las variables binarias `Soltero`, `ColorRojo`, `Suspensiones` y `ConducenHijos` a un formato booleano uniforme, donde 1 (o `TRUE`) identifica el caso afirmativo.
+
+```{r estandarizacion-binarias}
+unique(data$Soltero)
+unique(data$ColorRojo)
+unique(data$Suspensiones)
+unique(data$ConducenHijos)
+
+data$Soltero <- data$Soltero %in% c("Si", "SI", "si", "Sí", "SÍ", "sí")
+data$ColorRojo <- data$ColorRojo %in% c("Si", "SI", "si", "Sí", "SÍ", "sí")
+data$Suspensiones <- data$Suspensiones %in% c("Si", "SI", "si", "Sí", "SÍ", "sí")
+
+str(data[, c("Soltero", "ColorRojo", "Suspensiones", "ConducenHijos")])
+```
+
+Al validar los valores únicos de cada variable, se identificó que `ConducenHijos` no es estrictamente binaria: presenta 5 valores posibles (del 0 al 4), correspondientes al número de hijos del asegurado que conducen el vehículo, en lugar de un simple indicador sí/no. 
+
+Dado que esta variable numérica ya explica adecuadamente la magnitud del fenómeno (cuántos hijos conducen, no solo si alguno lo hace), se decide no forzar su conversión a booleano, preservando la información completa para su uso en análisis posteriores donde la magnitud pueda ser relevante.
+
+Las variables `Soltero`, `ColorRojo` y `Suspensiones` quedan estandarizadas como valores lógicos (`TRUE`/`FALSE`), donde `TRUE` identifica de forma consistente el caso afirmativo, independientemente del formato original del texto (mayúscula/minúscula). `ConducenHijos` se conserva en su formato numérico original.
+
+# Fase 2: Manipulación, Agregación y Métricas de Siniestralidad
+
+## 1. Severidad y frecuencia de siniestros por vehículo
+
+Se calculan las métricas de siniestralidad agregadas por Tipo de vehículo y Uso (Comercial vs. Privado): porcentaje de asegurados con al menos un siniestro, frecuencia promedio, cuantía total reclamada y cuantía promedio por siniestro.
+
+```{r severidad-frecuencia}
+resultado_2_1 <- data %>%
+  group_by(Tipo, Uso) %>%
+  summarise(
+    Asegurados = n(),
+    Asegurados_con_siniestro = sum(NSiniestros > 0),
+    Porcentaje_con_siniestro = mean(NSiniestros > 0) * 100,
+    Frecuencia_promedio = mean(NSiniestros),
+    Cuantia_total = sum(TCuantia),
+    Siniestros_totales = sum(NSiniestros),
+    Cuantia_promedio_por_siniestro = ifelse(sum(NSiniestros) > 0,
+                                            sum(TCuantia) / sum(NSiniestros), NA),
+    .groups = "drop"
+  ) %>%
+  arrange(Tipo, Uso)
+
+resultado_2_1
+
+# Identificación de los extremos
+resultado_2_1[which.max(resultado_2_1$Porcentaje_con_siniestro), ]
+resultado_2_1[which.max(resultado_2_1$Frecuencia_promedio), ]
+resultado_2_1[which.max(resultado_2_1$Cuantia_total), ]
+resultado_2_1[which.max(resultado_2_1$Cuantia_promedio_por_siniestro), ]
+```
+
+El vehículo **Deportivo de uso Comercial** domina tres de las cuatro métricas analizadas: presenta el mayor porcentaje de asegurados con siniestros (84.4%), la mayor frecuencia promedio (1.77 siniestros por asegurado) y la mayor severidad promedio por siniestro ($6,367). La única métrica donde no lidera es la cuantía total acumulada, donde **SUV Privado** encabeza con $119,798,520 — resultado explicado por su mayor volumen de asegurados (14,589, frente a los 1,451 de Deportivo Comercial), no por un mayor riesgo individual.
+
+Un patrón consistente en toda la tabla es que, dentro de cada tipo de vehículo, el uso **Comercial** presenta sistemáticamente un mayor porcentaje de asegurados con siniestro y mayor frecuencia promedio que el uso **Privado** (por ejemplo, Pickup: 81.9% Comercial vs. 73.8% Privado; Van: 82.5% vs. 74.4%). Esto es coherente con la intuición actuarial de que los vehículos de uso comercial están expuestos a mayor kilometraje y horas de circulación, incrementando su exposición al riesgo.
+
+## 2. Análisis de riesgo demográfico y experiencia
+
+Se crean rangos de edad (según la consigna: Joven <30, Adulto 30-55, Senior >55) y de experiencia al volante, y se determina qué segmento presenta el mayor valor acumulado de pérdidas.
+
+```{r rangos-edad-experiencia}
+data$RangoEdad <- cut(data$Edad,
+                      breaks = c(-Inf, 29, 55, Inf),
+                      labels = c("Joven", "Adulto", "Senior"))
+
+summary(data$Experiencia)
+
+data$RangoExperiencia <- cut(data$Experiencia,
+                             breaks = quantile(data$Experiencia, probs = c(0, 1/3, 2/3, 1)),
+                             labels = c("Baja", "Media", "Alta"),
+                             include.lowest = TRUE)
+```
+
+Dado que la consigna no especifica los cortes de experiencia, se definieron en base a los terciles reales de la variable (cortes en el percentil 33 y 66), asegurando una distribución objetiva y balanceada en lugar de umbrales arbitrarios.
+
+```{r perdidas-edad}
+perdidas_edad <- data %>%
+  group_by(RangoEdad) %>%
+  summarise(
+    Asegurados = n(),
+    Siniestros_totales = sum(NSiniestros),
+    Perdida_acumulada = sum(TCuantia),
+    Reclamo_promedio = mean(TCuantia),
+    .groups = "drop"
+  ) %>%
+  mutate(Participacion_perdida_pct = Perdida_acumulada / sum(Perdida_acumulada) * 100)
+
+perdidas_edad
+
+perdidas_edad$RangoEdad[which.max(perdidas_edad$Perdida_acumulada)]
+```
+
+El segmento **Adulto** (30-55 años) concentra la mayor pérdida acumulada de la cartera ($446,650,302, equivalente al 83.8% del total), muy por encima de Senior (11.0%) y Joven (5.17%). Sin embargo, este resultado está fuertemente influenciado por el tamaño del grupo: Adulto representa 54,568 de los 65,000 asegurados (84%), por lo que su dominancia en pérdidas acumuladas es, en gran medida, un efecto de volumen y no necesariamente de mayor riesgo individual. De hecho, al observar el reclamo promedio por asegurado, los tres grupos son sorprendentemente similares (Joven: $8,644; Adulto: $8,185; Senior: $8,124) — el grupo Joven tiene, de hecho, el reclamo promedio más alto de los tres, sugiriendo un perfil de riesgo per cápita ligeramente mayor a pesar de representar la menor pérdida acumulada total.
+
+```{r severidad-educacion}
+severidad_educacion <- data %>%
+  group_by(Educacion) %>%
+  summarise(
+    Asegurados = n(),
+    Siniestros_totales = sum(NSiniestros),
+    Cuantia_total = sum(TCuantia),
+    .groups = "drop"
+  ) %>%
+  mutate(Severidad_promedio = ifelse(Siniestros_totales > 0,
+                                     Cuantia_total / Siniestros_totales, NA))
+
+severidad_educacion
+```
+
+No se observa una diferencia considerable en la severidad promedio por siniestro entre niveles educativos: el rango va de $4,879 (Superior) a $5,218 (Master), una diferencia de apenas 6.9%. Esto sugiere que el nivel educativo no es un factor determinante de la severidad de los siniestros en esta cartera.
+
+## 3. Razón vehículo-ingreso e infracciones
+
+Se calcula la razón entre el valor del vehículo y el ingreso del asegurado, y se analiza su relación con las suspensiones de licencia y la frecuencia de accidentes en zonas urbanas y rurales.
+
+```{r razon-vehiculo-ingreso}
+data$Razon <- ifelse(data$Ingresos > 0, data$ValVehiculo / data$Ingresos, NA)
+
+sum(is.na(data$Razon))
+```
+
+Se identificaron 6,426 registros donde la razón vehículo-ingreso no pudo calcularse, correspondientes a asegurados con `Ingresos = 0`.
+
+```{r razon-zona-suspensiones}
+resumen_zona_suspensiones <- data %>%
+  group_by(Zona, Suspensiones) %>%
+  summarise(
+    Asegurados = n(),
+    Razon_promedio = mean(Razon, na.rm = TRUE),
+    Razon_mediana = median(Razon, na.rm = TRUE),
+    Frecuencia_promedio = mean(NSiniestros),
+    Siniestros_totales = sum(NSiniestros),
+    .groups = "drop"
+  )
+
+resumen_zona_suspensiones
+
+frecuencia_zona <- data %>%
+  group_by(Zona) %>%
+  summarise(
+    Asegurados = n(),
+    Siniestros_totales = sum(NSiniestros),
+    Frecuencia_promedio = mean(NSiniestros),
+    .groups = "drop"
+  )
+
+frecuencia_zona
+```
+
+Al comparar la razón promedio entre asegurados con y sin suspensiones de licencia, se observa un patrón contraintuitivo: en ambas zonas, los asegurados **sin** suspensiones presentan una razón vehículo-ingreso más alta que los que **sí** tienen suspensiones (Rural: 1.54 vs. 0.671; Urbano: 0.998 vs. 0.547). Es decir, quienes compran vehículos más costosos en relación a su ingreso no son, en este dataset, los que más suspensiones acumulan.
+
+Respecto a la zona geográfica, la frecuencia promedio de siniestros es notablemente mayor en **Urbano** (1.72) que en **Rural** (0.928) — casi el doble—, consistente con la mayor densidad de tráfico y exposición en zonas urbanas.
+
+```{r correlaciones}
+data$Suspensiones_num <- as.numeric(data$Suspensiones)
+
+cor(data[, c("Razon", "Suspensiones_num", "NSiniestros")],
+    use = "complete.obs", method = "pearson")
+
+cor(data[, c("Razon", "Suspensiones_num", "NSiniestros")],
+    use = "complete.obs", method = "spearman")
+
+data %>%
+  group_by(Zona) %>%
+  summarise(
+    Pearson_Razon_Frecuencia = cor(Razon, NSiniestros, use = "complete.obs", method = "pearson"),
+    Spearman_Razon_Frecuencia = cor(Razon, NSiniestros, use = "complete.obs", method = "spearman"),
+    .groups = "drop"
+  )
+```
+
+La correlación entre `Razon` y `Suspensiones` es prácticamente nula tanto en Pearson (-0.0079) como en Spearman (-0.0005), y la correlación entre `Razon` y `NSiniestros` también es casi nula (Pearson: -0.011; Spearman: 0.003). Al desagregar la correlación Razón-Frecuencia por zona, ambas resultan igualmente débiles y de signo negativo (Rural: Pearson -0.019, Spearman -0.036; Urbano: Pearson -0.008, Spearman 0.029).
+
+En términos descriptivos, ni la razón vehículo-ingreso ni las suspensiones de licencia muestran una asociación relevante con la frecuencia de siniestros en este análisis exploratorio; el factor que sí muestra una diferencia clara y consistente es la zona geográfica (urbano vs. rural), que prácticamente duplica la frecuencia promedio de siniestros.
+
+# Fase 3: Visualización de Datos e Insights Visuales
+
+## 1. Distribución de la cuantía de reclamaciones
+
+Se construye un histograma de `TCuantia` para la población siniestrada (`NSiniestros > 0`), aplicando una transformación logarítmica `log(1 + TCuantia)` para mitigar el sesgo a la derecha característico de las variables monetarias.
+
+```{r distribucion-tcuantia}
+siniestrados <- data %>% filter(NSiniestros > 0)
+
+hist(siniestrados$TCuantia,
+     main = "Distribución de TCuantia (sin transformar)",
+     xlab = "Cuantía reclamada ($)", col = "lightblue", breaks = 50)
+
+hist(log(1 + siniestrados$TCuantia),
+     main = "Distribución de log(1 + TCuantia)",
+     xlab = "log(1 + Cuantía reclamada)", col = "lightsalmon", breaks = 50)
+
+# Cuantificación de la asimetría antes y después de la transformación
+skewness(siniestrados$TCuantia)
+skewness(log(1 + siniestrados$TCuantia))
+```
+
+La distribución original de TCuantia presenta un fuerte sesgo a la derecha, con la mayoría de las reclamaciones concentradas por debajo de 10,000 y una cola extendida de reclamaciones de alto valor que se dispersa hasta cerca de 60,000. 
+
+La asimetría (skewness) de TCuantia en la población siniestrada es de 1.80, confirmando el fuerte sesgo a la derecha observado visualmente. Tras la transformación logarítmica, la asimetría se reduce a 0.12 — una disminución del 93%, cuantificando de forma objetiva la efectividad de la transformación para aproximar la distribución a una forma simétrica.
+
+La transformación logarítmica revela una estructura que el histograma original ocultaba: la distribución es visiblemente bimodal, con un pico principal alrededor de log≈8.7 (equivalente a montos cercanos a $5,000-$6,000) y un segundo pico más pequeño alrededor de log≈10.3 (montos cercanos a $30,000). 
+
+Esto sugiere la existencia de dos subpoblaciones de severidad distintas dentro de la cartera —posiblemente siniestros menores (daños leves, reparaciones) frente a siniestros mayores (pérdida total, daños graves)— en lugar de una única distribución continua homogénea.
+
+## 2. Comparación territorial y tipo de Uso
+
+Se construye un boxplot que contrapone el costo acumulado de siniestros entre uso Comercial y Privado, segmentado por Zona (Urbano vs. Rural).
+
+```{r boxplot-zona-uso}
+costo_por_asegurado <- data %>%
+  group_by(Zona, Uso) %>%
+  summarise(Costo_total = sum(TCuantia), .groups = "drop")
+
+boxplot(TCuantia ~ Uso * Zona, data = data,
+        main = "Costo de siniestros por Uso y Zona",
+        xlab = "Uso - Zona", ylab = "Cuantía reclamada ($)",
+        col = c("lightblue", "lightsalmon"),
+        las = 2, cex.axis = 0.7)
+
+costo_por_asegurado
+```
+
+El boxplot muestra medianas de cuantía reclamada relativamente similares entre las cuatro combinaciones de Uso y Zona, aunque la zona Urbana concentra una cantidad considerablemente mayor de valores atípicos de alto monto que la zona Rural, reflejando su mayor volumen de siniestros.
+
+Al analizar el costo acumulado total, la diferencia entre zonas es contundente: la zona Urbana concentra $498,446,366 en costo total (Comercial: $198,014,708 + Privado: $300,431,658), frente a apenas $34,610,270 en la zona Rural (Comercial: $13,858,165 + Privado: $20,752,105) — la zona Urbana representa aproximadamente el 93.5% del costo total de siniestros de toda la cartera. 
+
+Dentro de cada zona, el uso Privado acumula un costo total mayor que el Comercial (Urbano: $300.4M vs. $198.0M; Rural: $20.8M vs. $13.9M), lo cual es explicado principalmente por el mayor volumen de asegurados en uso Privado, más que por una mayor severidad individual —de hecho, en la Fase 2.1 se observó que los segmentos Comerciales tienden a tener mayor frecuencia y severidad promedio por asegurado individual—.
+
+## 3. Matriz de infracciones y perfil familiar
+
+Se genera un gráfico de dispersión que evalúa la relación entre el número de suspensiones, la experiencia del conductor y el total reclamado, diferenciando por color si el vehículo es conducido por los hijos del titular.
+
+```{r dispersión-suspensiones-experiencia}
+data$ConducenHijos_flag <- ifelse(data$ConducenHijos > 0, "Sí", "No")
+
+plot(data$Experiencia, data$TCuantia,
+     col = ifelse(data$ConducenHijos_flag == "Sí", "red", "blue"),
+     pch = 16, cex = 0.5,
+     main = "Experiencia vs. Cuantía reclamada, por ConducenHijos",
+     xlab = "Experiencia (años)", ylab = "Cuantía reclamada ($)")
+legend("topright", legend = c("Hijos NO conducen", "Hijos SÍ conducen"),
+       col = c("blue", "red"), pch = 16)
+```
+
+El gráfico de dispersión no muestra una relación visual clara entre la experiencia del conductor y la cuantía reclamada: los montos reclamados se distribuyen de forma similar a lo largo de todo el rango de experiencia (1 a 25 años), sin una tendencia descendente o ascendente evidente. 
+
+Se observa, sin embargo, una mayor densidad de observaciones en el rango de experiencia baja (1-10 años), consistente con la distribución general de la variable Experiencia en la cartera. La diferenciación por color (hijos que conducen, en rojo) no revela un patrón visual distintivo frente a los casos donde los hijos no conducen (azul) — los puntos rojos se distribuyen de forma dispersa entre los azules, sin concentrarse en una zona particular del gráfico. 
+
+Esta ausencia de patrón visual es consistente con las correlaciones débiles encontradas en la Fase 2 entre variables relacionadas con el comportamiento de riesgo, y refuerza el hallazgo del heatmap: Suspensiones, no ConducenHijos ni Experiencia, es el factor con la asociación más clara y consistente respecto a la severidad de los reclamos.
+
+```{r heatmap-suspensiones-experiencia}
+heatmap_data <- data %>%
+  group_by(Suspensiones, ConducenHijos) %>%
+  summarise(
+    Asegurados = n(),
+    Reclamo_promedio = mean(TCuantia),
+    .groups = "drop"
+  )
+
+heatmap_data
+
+ggplot(heatmap_data, aes(x = factor(Suspensiones), y = factor(ConducenHijos), fill = Reclamo_promedio)) +
+  geom_tile() +
+  geom_text(aes(label = paste0("$", round(Reclamo_promedio), "\n(n=", Asegurados, ")")),
+            size = 3, color = "black") +
+  scale_fill_gradient(low = "lightyellow", high = "darkred") +
+  labs(title = "Reclamo promedio por Suspensiones y N° de hijos que conducen",
+       x = "Suspensiones", y = "N° de hijos que conducen", fill = "Reclamo promedio ($)") +
+  theme_minimal()
+```
+
+El heatmap revela que Suspensiones es, por amplio margen, el factor más determinante del reclamo promedio: en todos los niveles de ConducenHijos, los asegurados con suspensiones de licencia registran un reclamo promedio entre 2.4 y 4.9 veces mayor que aquellos sin suspensiones (por ejemplo, en asegurados sin hijos conductores: $24,257 con suspensiones vs. $5,461 sin ellas). Este hallazgo contrasta con la correlación casi nula observada en la Fase 2 entre Suspensiones y NSiniestros (0.024): la relación no se manifiesta en la frecuencia de siniestros, sino en su severidad monetaria — los asegurados con historial de suspensiones no necesariamente siniestran más veces, pero cuando lo hacen, los reclamos son considerablemente más costosos.
+
+Respecto a ConducenHijos, no se observa un patrón monotónico claro dentro de cada columna de Suspensiones. Las celdas correspondientes a 3 y 4 hijos conductores presentan tamaños de muestra reducidos (n=11 a n=112, frente a los más de 48,000 casos de la celda base), por lo que sus valores extremos deben interpretarse con cautela y no como una tendencia robusta.
+
+# 4. Insights integrados
+
+- La Fase 1 permite convertir las variables monetarias a un formato utilizable y documentar los faltantes antes de la agregación, con una estrategia de imputación fundamentada en evidencia (dependencia por categoría) en lugar de reglas arbitrarias.
+
+- La Fase 2 muestra diferencias claras entre tipos de vehículo y uso: Deportivo Comercial presenta el mayor porcentaje de asegurados con siniestros, la mayor frecuencia promedio y la mayor severidad promedio por siniestro; SUV Privado concentra la mayor cuantía acumulada, explicado principalmente por su volumen de asegurados.
+
+- En el componente demográfico, el segmento Adulto reúne la mayor participación de pérdida acumulada (83.8%), aunque este resultado está determinado por el tamaño del grupo más que por un mayor riesgo individual, como lo confirma el reclamo promedio per cápita, relativamente similar entre segmentos etarios.
+
+- La Fase 3 confirma visualmente el sesgo a la derecha de `TCuantia` (y su naturaleza bimodal) y muestra que la transformación logarítmica reduce la asimetría en un 93%. El hallazgo más contundente del análisis es la fuerte asociación entre `Suspensiones` y la severidad de los reclamos: en todos los niveles de `ConducenHijos`, los asegurados con suspensiones registran un reclamo promedio entre 2.4 y 4.9 veces mayor.
+
+- Los resultados son descriptivos del conjunto de datos suministrado. Las asociaciones y concentraciones observadas no deben interpretarse como relaciones causales sin un análisis estadístico adicional (por ejemplo, un modelo de regresión que controle por variables confusoras).
+
+# 5. Conclusiones
+
+El proyecto integra limpieza, manipulación y visualización en un mismo proceso de análisis actuarial. La Fase 1 establece una base consistente para trabajar con variables monetarias y datos faltantes, fundamentando cada decisión de imputación en evidencia diagnóstica; la Fase 2 resume la siniestralidad mediante indicadores agregados de frecuencia y severidad; y la Fase 3 convierte estos resultados en visualizaciones interpretables. En conjunto, el análisis permite identificar segmentos con alta concentración de siniestros o pérdidas, observar diferencias territoriales y por uso, y reconocer la necesidad de tratar las distribuciones altamente sesgadas mediante transformaciones visuales y de escala.
